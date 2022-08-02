@@ -1,25 +1,20 @@
 import {
-  BN,
   BookSide,
   BookSideLayout,
   getPerpMarketByBaseSymbol,
-  MangoAccount,
-  MangoAccountLayout,
-  PerpOrder,
 } from '@blockworks-foundation/mango-client'
 
-import { connection, walletKeyPair } from './config'
-import { SOL_MINT, USDC_MINT } from './constants'
+import { connection } from './config'
+import { SOL_MINT } from './constants'
 import {
   initMango,
   Order,
   OrderbookSide,
-  placePerpTrailingOrder,
 } from './mango'
-import { debounce } from './utils/debounce'
-import { floor, toRaw, toUi } from './utils/amount'
+import { floor } from './utils/amount'
 import { wait } from './utils/wait'
-import { executeJupiterSwap, initJupiter, SwapResult } from './jupiter'
+import { initJupiter } from './jupiter'
+import { closeShortDeltaNeutralPosition, openShortDeltaNeutralPosition } from './position'
 
 const main = async () => {
   // ----------
@@ -71,83 +66,41 @@ const main = async () => {
   })()
 
   const jupiter = await initJupiter()
-  // -------------------
-  // Check spread
-  // If possible place limit sell order in front of the highest ask
-  // otherwise place on the highest ask
-  //
-  // Subscribe to mango account
-  // On SOL base position update buy the same amount on Jupiter
-  // and deposit to mango
 
   const inputSolAmountUi = (() => {
     const [highestAsk] = getOrderbookSide('asks')
-    return floor(50 / highestAsk[0], 2)
+    return floor(200 / highestAsk[0], 2)
   })()
 
+  console.log(`Opening delta neutral position with size ${inputSolAmountUi} SOL`)
+
   const solTokenIndex = mangoGroup.tokens.findIndex(({ mint }) => mint.equals(SOL_MINT))
-  const openShortDeltaNeutralPosition = async () => {
-    const solPositionSizeUi = inputSolAmountUi
+  const positionSize = await openShortDeltaNeutralPosition({
+    jupiter,
+    mangoAccount,
+    mangoClient,
+    mangoGroup,
+    perpMarket,
+    getOrderbookSide,
+    basePositionSizeUi: inputSolAmountUi,
+    tokenIndex: solTokenIndex,
+  })
 
-    // -------------------
-    // Open hedge position
-    await (async () => {
-      const debouncedSwap = debounce(async (solOutputAmountUi: number) => {
-        let result: SwapResult | null = null
-        console.log(`Executing buy for ${solOutputAmountUi} SOL`)
-        do {
-          result = await executeJupiterSwap(jupiter, {
-            inputMint: USDC_MINT,
-            outputMint: SOL_MINT,
-            amountRaw: toRaw(solOutputAmountUi, 9),
-            exactOut: true,
-          })
+  console.log(`Successfuly opened short position with size ${positionSize} SOL`)
 
-          if (!result) {
-            await wait(500)
-          }
-        } while (!result)
-      }, 2000)
+  await wait(5000)
 
-      let openedPositionSize = 0
-      const subscriptionId = connection.onAccountChange(mangoAccount.publicKey, (accountInfo) => {
-        const decoded = MangoAccountLayout.decode(accountInfo.data)
-        const account = new MangoAccount(mangoAccount.publicKey, decoded)
-        const currentPositionSize = Math.abs(
-          account.getBasePositionUiWithGroup(solTokenIndex, mangoGroup),
-        )
-
-        if (currentPositionSize === openedPositionSize) {
-          return
-        }
-
-        const solAmountToBuy = currentPositionSize - openedPositionSize
-        debouncedSwap(solAmountToBuy)
-
-        openedPositionSize = currentPositionSize
-        // Actual position size can vary by small amount
-        console.log(floor(openedPositionSize, 2), solPositionSizeUi)
-        if (floor(openedPositionSize, 2) === solPositionSizeUi) {
-          connection.removeAccountChangeListener(subscriptionId)
-          console.log(`Successfully opened delta-neutral position with size: ${openedPositionSize}`)
-        }
-      })
-
-      await wait(1000)
-    })()
-
-    await placePerpTrailingOrder({
-      positionSizeUi: solPositionSizeUi,
-      orderSide: 'sell',
-      orderbookSideGetter: getOrderbookSide,
-      mangoClient,
-      mangoGroup,
-      mangoAccount,
-      perpMarket,
-    })
-  }
-
-  // await openShortDeltaNeutralPosition()
+  await closeShortDeltaNeutralPosition({
+    basePositionSizeUi: positionSize,
+    tokenIndex: solTokenIndex,
+    jupiter,
+    mangoAccount,
+    mangoClient,
+    mangoGroup,
+    perpMarket,
+    getOrderbookSide,
+  })
+  console.log(`Successfuly closed short position with size ${positionSize} SOL`)
 }
 
 main()

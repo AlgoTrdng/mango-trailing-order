@@ -12,7 +12,7 @@ export const initJupiter = async () => (
   })
 )
 
-type SwapParams = {
+export type SwapParams = {
   inputMint: PublicKey
   outputMint: PublicKey
   amountRaw: number

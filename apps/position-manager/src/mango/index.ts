@@ -38,11 +38,12 @@ export const initMango = async () => {
 
 export type Order = [number, number]
 export type OrderbookSide = 'asks' | 'bids'
+export type GetOrderbookSide = (side: OrderbookSide) => Order[]
 
 type PlacePerpTrailingOrderParams = {
   positionSizeUi: number
   orderSide: 'sell' | 'buy'
-  orderbookSideGetter: (side: OrderbookSide) => Order[]
+  orderbookSideGetter: GetOrderbookSide
   mangoClient: MangoClient
   mangoGroup: MangoGroup
   mangoAccount: MangoAccount
@@ -137,18 +138,36 @@ export const placePerpTrailingOrder = async ({
     // eslint-disable-next-line prefer-destructuring
     price = highestOrder[0]
     console.log(`Changing order to $ ${price}`)
-    await mangoClient.modifyPerpOrder(
-      mangoGroup,
-      mangoAccount,
-      mangoGroup.mangoCache,
-      perpMarket,
-      walletKeyPair,
-      order,
-      orderSide,
-      price,
-      order.size,
-      'limit',
-      orderId,
-    )
+
+    // Change order
+    try {
+      await mangoClient.modifyPerpOrder(
+        mangoGroup,
+        mangoAccount,
+        mangoGroup.mangoCache,
+        perpMarket,
+        walletKeyPair,
+        order,
+        orderSide,
+        price,
+        order.size,
+        'limit',
+        orderId,
+      )
+    } catch (error: Error | any) {
+      // If transaction fails check if there are still any orders after 10 secs
+      //   If yes, continue
+      //   If not, position was fully opened
+      if (error?.message === 'Transaction failed') {
+        await wait(10_000)
+        const orders = await perpMarket.loadOrdersForAccount(connection, mangoAccount)
+        const currentOrder = orders.find(({ clientId }) => clientId?.toNumber() === orderId)
+
+        if (!currentOrder) {
+          console.log('Short position was fully opened')
+          return
+        }
+      }
+    }
   }
 }
